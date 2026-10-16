@@ -1,4 +1,4 @@
-// mxdpi: read and set the DPI of a Logitech MX Master 3S (or another HID++ 2.0 mouse)
+// mxctl: read and set the DPI of a Logitech MX Master 3S (or another HID++ 2.0 mouse)
 // connected over Bluetooth LE on macOS, without Logi Options+.
 //
 // Over Bluetooth the mouse exposes HID++ as vendor collection 0xFF43/0x0202 with long reports only:
@@ -18,21 +18,21 @@ let featureWirelessStatus: UInt16 = 0x1D4B  // the mouse sends an event from thi
 let matching = [kIOHIDVendorIDKey: logitechVendorID, kIOHIDDeviceUsagePageKey: hidppUsagePage] as CFDictionary
 
 let home = FileManager.default.homeDirectoryForCurrentUser
-let savedDPIURL = home.appendingPathComponent(".config/mxdpi/dpi")
-let agentLabel = "local.mxdpi"
+let savedDPIURL = home.appendingPathComponent(".config/mxctl/dpi")
+let agentLabel = "local.mxctl"
 let agentURL = home.appendingPathComponent("Library/LaunchAgents/\(agentLabel).plist")
-let logURL = home.appendingPathComponent("Library/Logs/mxdpi.log")
+let logURL = home.appendingPathComponent("Library/Logs/mxctl.log")
 
 let hidppErrors = ["no error", "unknown", "invalid argument", "out of range", "hardware error",
                    "internal error", "invalid feature index", "invalid function", "busy", "unsupported"]
 
 let usage = """
-    usage: mxdpi [get]        print the current DPI
-           mxdpi set <dpi>    set the DPI and save it for `watch`
-           mxdpi info         show the supported range, the default, and the saved DPI
-           mxdpi watch        stay running; re-apply the saved DPI whenever the mouse reconnects
-           mxdpi install      run `mxdpi watch` at login (LaunchAgent \(agentLabel))
-           mxdpi uninstall    remove the LaunchAgent
+    usage: mxctl [get]        print the current DPI
+           mxctl set <dpi>    set the DPI and save it for `watch`
+           mxctl info         show the supported range, the default, and the saved DPI
+           mxctl watch        stay running; re-apply the saved DPI whenever the mouse reconnects
+           mxctl install      run `mxctl watch` at login (LaunchAgent \(agentLabel))
+           mxctl uninstall    remove the LaunchAgent
     """
 
 struct MXError: Error, CustomStringConvertible {
@@ -43,8 +43,8 @@ struct MXError: Error, CustomStringConvertible {
 /// macOS lets a process open a Bluetooth mouse only with Input Monitoring permission.
 struct PermissionError: Error, CustomStringConvertible {
     var description: String {
-        "macOS blocked access to the mouse. Turn on mxdpi in System Settings > Privacy & Security > "
-            + "Input Monitoring (or add \(Bundle.main.executablePath ?? "mxdpi") there with +), then try again."
+        "macOS blocked access to the mouse. Turn on mxctl in System Settings > Privacy & Security > "
+            + "Input Monitoring (or add \(Bundle.main.executablePath ?? "mxctl") there with +), then try again."
     }
 }
 
@@ -97,7 +97,7 @@ final class Mouse {
         let name = IOHIDDeviceGetProperty(device, kIOHIDProductKey as CFString) as? String ?? "Logitech device"
         let status = IOHIDDeviceOpen(device, IOOptionBits(kIOHIDOptionsTypeNone))
         if status == ioReturnNotPermitted {
-            // Asking once adds mxdpi to the Input Monitoring list and shows the system prompt.
+            // Asking once adds mxctl to the Input Monitoring list and shows the system prompt.
             if IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeUnknown {
                 _ = IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
             }
@@ -282,7 +282,7 @@ final class Watcher {
 
     private func apply(_ mouse: Mouse, attempt: Int = 1) {
         guard let wanted = savedDPI() else {
-            logLine("\(mouse.name): no saved DPI yet; run `mxdpi set <dpi>`")
+            logLine("\(mouse.name): no saved DPI yet; run `mxctl set <dpi>`")
             return
         }
         do {
@@ -345,7 +345,7 @@ func launchctl(_ arguments: String..., quiet: Bool = false) -> Int32 {
 }
 
 func installAgent() throws {
-    guard savedDPI() != nil else { throw MXError("run `mxdpi set <dpi>` first; the agent re-applies the saved DPI") }
+    guard savedDPI() != nil else { throw MXError("run `mxctl set <dpi>` first; the agent re-applies the saved DPI") }
     guard let executable = Bundle.main.executableURL?.resolvingSymlinksInPath() else {
         throw MXError("cannot find the path of this program")
     }
@@ -379,17 +379,17 @@ func uninstallAgent() {
 }
 
 /// macOS checks Input Monitoring against the app that started a program, such as the terminal.
-/// Starting again as our own responsible process means only mxdpi needs the permission, so the
+/// Starting again as our own responsible process means only mxctl needs the permission, so the
 /// CLI and the LaunchAgent share one grant. launchd already starts its jobs this way.
 func relaunchAsOwnResponsibleProcess() {
-    guard getenv("MXDPI_RELAUNCHED") == nil, getppid() != 1, let path = Bundle.main.executablePath,
+    guard getenv("MXCTL_RELAUNCHED") == nil, getppid() != 1, let path = Bundle.main.executablePath,
           let symbol = dlsym(dlopen(nil, RTLD_NOW), "responsibility_spawnattrs_setdisclaim") else { return }
     typealias SetDisclaim = @convention(c) (UnsafeMutablePointer<posix_spawnattr_t?>, Int32) -> Int32
     var attributes: posix_spawnattr_t?
     posix_spawnattr_init(&attributes)
     defer { posix_spawnattr_destroy(&attributes) }
     guard unsafeBitCast(symbol, to: SetDisclaim.self)(&attributes, 1) == 0 else { return }
-    setenv("MXDPI_RELAUNCHED", "1", 1)
+    setenv("MXCTL_RELAUNCHED", "1", 1)
     let argv = CommandLine.arguments.map { strdup($0) } + [nil]
     var pid: pid_t = 0
     guard posix_spawn(&pid, path, nil, &attributes, argv, environ) == 0 else { return }
@@ -433,6 +433,6 @@ do {
         usageError()
     }
 } catch {
-    FileHandle.standardError.write(Data("mxdpi: \(error)\n".utf8))
+    FileHandle.standardError.write(Data("mxctl: \(error)\n".utf8))
     exit(1)
 }
