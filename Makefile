@@ -2,7 +2,7 @@ PREFIX ?= $(HOME)/.local
 SOURCES = $(wildcard *.swift)
 
 # Signs with a fixed designated requirement instead of the default hash of this exact build,
-# so the Input Monitoring grant can survive rebuilds.
+# so the Input Monitoring grant survives rebuilds.
 mxctl: $(SOURCES)
 	swiftc -O -o $@ $(SOURCES)
 	codesign --force --sign - --identifier local.mxctl --requirements='=designated => identifier "local.mxctl"' $@
