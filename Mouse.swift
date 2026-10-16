@@ -9,8 +9,9 @@ let logitechVendorID = 0x046D
 let hidppUsagePage = 0xFF43
 let reportID: UInt8 = 0x11
 let reportLength = 20
-let featureAdjustableDPI: UInt16 = 0x2201
+let featureBattery: UInt16 = 0x1004         // Unified Battery
 let featureWirelessStatus: UInt16 = 0x1D4B  // the mouse sends an event from this feature after it reconnects
+let featureDPI: UInt16 = 0x2201             // Adjustable DPI
 let matching = [kIOHIDVendorIDKey: logitechVendorID, kIOHIDDeviceUsagePageKey: hidppUsagePage] as CFDictionary
 
 let hidppErrors = ["no error", "unknown", "invalid argument", "out of range", "hardware error",
@@ -135,15 +136,17 @@ final class Mouse {
         return index
     }
 
-    private func dpiFeature() throws -> UInt8 {
-        guard let index = try featureIndex(featureAdjustableDPI) else {
-            throw MXError("\(name) has no adjustable DPI (HID++ feature 0x2201)")
+    func requireFeature(_ feature: UInt16, _ purpose: String) throws -> UInt8 {
+        guard let index = try featureIndex(feature) else {
+            throw MXError("\(name) has no \(purpose) (HID++ feature \(String(format: "0x%04X", feature)))")
         }
         return index
     }
 
+    // MARK: DPI (0x2201)
+
     func dpiRange() throws -> DPIRange {
-        let params = try request(dpiFeature(), 0x1, [0])
+        let params = try request(requireFeature(featureDPI, "adjustable DPI"), 0x1, [0])
         var values: [Int] = []
         var step: Int?
         for i in stride(from: 1, to: params.count - 1, by: 2) {
@@ -159,13 +162,26 @@ final class Mouse {
     }
 
     func dpi() throws -> (current: Int, standard: Int) {
-        let params = try request(dpiFeature(), 0x2, [0])
+        let params = try request(requireFeature(featureDPI, "adjustable DPI"), 0x2, [0])
         return (Int(params[1]) << 8 | Int(params[2]), Int(params[3]) << 8 | Int(params[4]))
     }
 
     func setDPI(_ dpi: Int) throws -> Int {
-        let params = try request(dpiFeature(), 0x3, [0, UInt8(dpi >> 8), UInt8(dpi & 0xFF)])
+        let params = try request(requireFeature(featureDPI, "adjustable DPI"), 0x3, [0, UInt8(dpi >> 8), UInt8(dpi & 0xFF)])
         return Int(params[1]) << 8 | Int(params[2])
+    }
+
+    // MARK: Battery (0x1004)
+
+    /// Charge and charging state, such as "85%, discharging".
+    func battery() throws -> String {
+        let index = try requireFeature(featureBattery, "battery reporting")
+        let capabilities = try request(index, 0x0)
+        let status = try request(index, 0x1)
+        let levels: [UInt8: String] = [8: "full", 4: "good", 2: "low", 1: "critical"]
+        let charge = capabilities[1] & 0x02 != 0 ? "\(status[0])%" : levels[status[1]] ?? "unknown level"
+        let states = ["discharging", "charging", "charging slowly", "fully charged", "charging error"]
+        return "\(charge), " + (Int(status[2]) < states.count ? states[Int(status[2])] : "charging state \(status[2])")
     }
 }
 
@@ -179,7 +195,7 @@ func connectedMice() throws -> [Mouse] {
     for device in devices {
         do {
             let mouse = try Mouse(device, softwareID: 0x0B)
-            if try mouse.featureIndex(featureAdjustableDPI) != nil { mice.append(mouse) }
+            if try mouse.featureIndex(featureDPI) != nil { mice.append(mouse) }
         } catch {
             firstError = firstError ?? error
         }

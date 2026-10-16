@@ -46,7 +46,7 @@ final class Watcher {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [self] in
             do {
                 let mouse = try Mouse(device, softwareID: 0x0C)
-                guard try mouse.featureIndex(featureAdjustableDPI) != nil else { return }
+                guard try mouse.featureIndex(featureDPI) != nil else { return }
                 let wirelessStatus = try mouse.featureIndex(featureWirelessStatus)
                 mouse.onEvent = { [weak mouse] featureIndex, params in
                     guard let mouse, featureIndex == wirelessStatus else { return }

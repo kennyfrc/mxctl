@@ -1,5 +1,5 @@
-// mxctl: read and set the DPI of a Logitech MX Master 3S (or another HID++ 2.0 mouse)
-// connected over Bluetooth LE on macOS, without Logi Options+.
+// mxctl: control a Logitech MX Master 3S (or a similar HID++ 2.0 mouse) connected over Bluetooth LE
+// on macOS, without Logi Options+: DPI and battery.
 //
 // The mouse forgets its settings when it powers off and comes back at its defaults (1000 DPI), so the
 // agent (`mxctl watch`, installed as a LaunchAgent) re-applies them whenever the mouse reconnects.
@@ -7,8 +7,9 @@
 import Foundation
 
 let usage = """
-    usage: mxctl                          show the DPI and the agent
+    usage: mxctl                          show battery, DPI, and the agent
            mxctl dpi [<dpi>]              print or set the DPI
+           mxctl battery                  print the battery charge
            mxctl watch                    stay running: re-apply settings when the mouse
                                           reconnects
            mxctl install | uninstall      run `mxctl watch` at login (LaunchAgent \(agentLabel))
@@ -69,6 +70,10 @@ func showStatus() throws {
         let dpi = try mouse.dpi()
         let range = try mouse.dpiRange()
         print(mouse.name)
+        if try mouse.featureIndex(featureBattery) != nil {
+            let battery = try mouse.battery()
+            print("  battery   \(battery)")
+        }
         print("  dpi       \(dpi.current) (default \(dpi.standard), supports \(range))")
     }
     print("settings    \(settingsURL.path)")
@@ -90,6 +95,8 @@ do {
     case "dpi" where arguments.count == 2:
         guard let dpi = Int(arguments[1]) else { usageError() }
         try setDPI(dpi)
+    case "battery" where arguments.count == 1:
+        try printEachMouse { try $0.battery() }
     case "watch" where arguments.count == 1:
         Watcher().run()
     case "install" where arguments.count == 1:
