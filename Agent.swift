@@ -24,6 +24,8 @@ final class Watcher {
     private var mice: [IOHIDDevice: Mouse] = [:]
     private var signalSources: [DispatchSourceSignal] = []
     private var commands: Set<Process> = []
+    private var busy = false
+    private var jobs: [() -> Void] = []
     private var notifyToken: Int32 = 0
 
     func run() -> Never {
@@ -44,9 +46,11 @@ final class Watcher {
             signal(signalNumber, SIG_IGN)
             let source = DispatchSource.makeSignalSource(signal: signalNumber, queue: .main)
             source.setEventHandler { [self] in
-                releaseDivertedButtons()
-                logLine("stopped")
-                exit(0)
+                serially { [self] in
+                    releaseDivertedButtons()
+                    logLine("stopped")
+                    exit(0)
+                }
             }
             source.resume()
             signalSources.append(source)
@@ -56,41 +60,54 @@ final class Watcher {
         exit(0)
     }
 
+    /// Waiting for a reply from the mouse runs the main run loop, which also runs queued main-thread
+    /// blocks. Jobs that talk to the mouse go through here, so one never starts inside another and
+    /// takes its reply.
+    private func serially(_ job: @escaping () -> Void) {
+        jobs.append(job)
+        guard !busy else { return }
+        busy = true
+        while !jobs.isEmpty { jobs.removeFirst()() }
+        busy = false
+    }
+
     private func connected(_ device: IOHIDDevice) {
         // Give a device that just appeared a moment before talking HID++ to it.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [self] in
-            do {
-                let mouse = try Mouse(device, softwareID: 0x0C)
-                guard try mouse.featureIndex(featureDPI) != nil else { return }
-                let wirelessStatus = try mouse.featureIndex(featureWirelessStatus)
-                let controls = try mouse.featureIndex(featureControls)
-                var held: Set<UInt16> = []
-                mouse.onEvent = { [weak mouse] featureIndex, function, params in
-                    guard let mouse else { return }
-                    if featureIndex == wirelessStatus {
-                        logLine("\(mouse.name) sent a reconnect event (\(params.prefix(3).map(String.init).joined(separator: " ")))")
-                        DispatchQueue.main.async { [weak mouse] in
-                            if let mouse { self.apply(mouse, reason: "reconnect event") }
-                        }
-                    } else if featureIndex == controls, function == 0 {
-                        // Diverted buttons report the control IDs held down right now, up to four.
-                        let now = Set(stride(from: 0, to: 8, by: 2).map { UInt16(params[$0]) << 8 | UInt16(params[$0 + 1]) })
-                            .subtracting([0])
-                        for cid in now.subtracting(held) {
-                            DispatchQueue.main.async { self.pressed(controlName(cid)) }
-                        }
-                        held = now
+            serially { [self] in setUp(device) }
+        }
+    }
+
+    private func setUp(_ device: IOHIDDevice) {
+        do {
+            let mouse = try Mouse(device, softwareID: 0x0C)
+            guard try mouse.featureIndex(featureDPI) != nil else { return }
+            let wirelessStatus = try mouse.featureIndex(featureWirelessStatus)
+            let controls = try mouse.featureIndex(featureControls)
+            var held: Set<UInt16> = []
+            mouse.onEvent = { [weak mouse] featureIndex, function, params in
+                guard let mouse else { return }
+                if featureIndex == wirelessStatus {
+                    logLine("\(mouse.name) sent a reconnect event (\(params.prefix(3).map(String.init).joined(separator: " ")))")
+                    DispatchQueue.main.async { self.apply(mouse, reason: "reconnect event") }
+                } else if featureIndex == controls, function == 0 {
+                    // Diverted buttons report the control IDs held down right now, up to four.
+                    let now = Set(stride(from: 0, to: 8, by: 2).map { UInt16(params[$0]) << 8 | UInt16(params[$0 + 1]) })
+                        .subtracting([0])
+                    for cid in now.subtracting(held) {
+                        DispatchQueue.main.async { self.pressed(controlName(cid)) }
                     }
+                    held = now
                 }
-                mice[device] = mouse
-                apply(mouse, reason: "connected")
-            } catch let error as PermissionError {
-                logLine("\(error)")
-                // A new grant may apply only to a new process; exit and let launchd start a fresh one.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 60) { exit(1) }
-            } catch {
-                logLine("\(error)")
             }
+            mice[device] = mouse
+            apply(mouse, reason: "connected")
+        } catch let error as PermissionError {
+            logLine("\(error)")
+            // A new grant may apply only to a new process; exit and let launchd start a fresh one.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 60) { exit(1) }
+        } catch {
+            logLine("\(error)")
         }
     }
 
@@ -99,32 +116,34 @@ final class Watcher {
     }
 
     private func apply(_ mouse: Mouse, reason: String, attempt: Int = 1) {
-        do {
-            let settings = try Settings.load()
-            var changes: [String] = []
-            if let wanted = settings.dpi {
-                let found = try mouse.dpi().current
-                if found != wanted {
-                    let now = try mouse.setDPI(wanted)
-                    changes.append("DPI \(found) -> \(now)")
-                }
-            }
-            if !settings.buttons.isEmpty {
-                let controls = try mouse.controls()
-                for (name, action) in settings.buttons.sorted(by: { $0.key < $1.key }) {
-                    guard let control = controls.first(where: { $0.name == name }) else { continue }
-                    let target = controls.first { $0.name == action.remap }?.cid ?? control.cid
-                    if try mouse.setReporting(control, diverted: action.needsAgent, actingAs: target) {
-                        changes.append("\(name): \(action)")
+        serially { [self] in
+            // The mouse may have disconnected while this job waited its turn.
+            guard mice.values.contains(where: { $0 === mouse }) else { return }
+            do {
+                let settings = try Settings.load()
+                var changes: [String] = []
+                if let wanted = settings.dpi {
+                    let found = try mouse.dpi().current
+                    if found != wanted {
+                        let now = try mouse.setDPI(wanted)
+                        changes.append("DPI \(found) -> \(now)")
                     }
                 }
-            }
-            logLine("\(mouse.name) \(reason): " + (changes.isEmpty ? "settings already applied" : changes.joined(separator: ", ")))
-        } catch {
-            logLine("\(mouse.name) \(reason): \(error)")
-            guard attempt < 3 else { return }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak mouse] in
-                if let mouse, self.mice.values.contains(where: { $0 === mouse }) {
+                if !settings.buttons.isEmpty {
+                    let controls = try mouse.controls()
+                    for (name, action) in settings.buttons.sorted(by: { $0.key < $1.key }) {
+                        guard let control = controls.first(where: { $0.name == name }) else { continue }
+                        let target = controls.first { $0.name == action.remap }?.cid ?? control.cid
+                        if try mouse.setReporting(control, diverted: action.needsAgent, actingAs: target) {
+                            changes.append("\(name): \(action)")
+                        }
+                    }
+                }
+                logLine("\(mouse.name) \(reason): " + (changes.isEmpty ? "settings already applied" : changes.joined(separator: ", ")))
+            } catch {
+                logLine("\(mouse.name) \(reason): \(error)")
+                guard attempt < 3 else { return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
                     self.apply(mouse, reason: reason, attempt: attempt + 1)
                 }
             }
