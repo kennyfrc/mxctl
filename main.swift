@@ -7,12 +7,11 @@
 import Foundation
 
 let usage = """
-    usage: mxctl [get]        print the current DPI
-           mxctl set <dpi>    set the DPI and save it for `watch`
-           mxctl info         show the supported range, the default, and the saved DPI
-           mxctl watch        stay running; re-apply the saved DPI whenever the mouse reconnects
-           mxctl install      run `mxctl watch` at login (LaunchAgent \(agentLabel))
-           mxctl uninstall    remove the LaunchAgent
+    usage: mxctl                          show the DPI and the agent
+           mxctl dpi [<dpi>]              print or set the DPI
+           mxctl watch                    stay running: re-apply the saved DPI when the mouse
+                                          reconnects
+           mxctl install | uninstall      run `mxctl watch` at login (LaunchAgent \(agentLabel))
     """
 
 /// macOS checks Input Monitoring against the app that started a program, such as the terminal.
@@ -40,6 +39,15 @@ func usageError() -> Never {
     exit(2)
 }
 
+/// Prints one value per connected mouse, with the mouse's name when there is more than one.
+func printEachMouse(_ value: (Mouse) throws -> String) throws {
+    let mice = try connectedMice()
+    for mouse in mice {
+        let text = try value(mouse)
+        print(mice.count == 1 ? text : "\(mouse.name): \(text)")
+    }
+}
+
 func setDPI(_ wanted: Int) throws {
     var applied: Int?
     for mouse in try connectedMice() {
@@ -56,38 +64,32 @@ func setDPI(_ wanted: Int) throws {
     if let applied { try saveDPI(applied) }
 }
 
-func showInfo() throws {
+func showStatus() throws {
     for mouse in try connectedMice() {
         let dpi = try mouse.dpi()
         let range = try mouse.dpiRange()
         print(mouse.name)
-        print("  current:   \(dpi.current) DPI")
-        print("  default:   \(dpi.standard) DPI")
-        print("  supported: \(range)")
+        print("  dpi       \(dpi.current) (default \(dpi.standard), supports \(range))")
     }
-    let agent = FileManager.default.fileExists(atPath: agentURL.path) ? "installed" : "not installed"
-    print("saved DPI:   \(savedDPI().map(String.init) ?? "none") (\(savedDPIURL.path))")
-    print("agent:       \(agent) (\(agentURL.path))")
+    print("saved DPI   \(savedDPI().map(String.init) ?? "none") (\(savedDPIURL.path))")
+    print("agent       \(agentIsLoaded() ? "installed" : "not installed") (\(agentLabel))")
 }
 
 setvbuf(stdout, nil, _IOLBF, 0)
 let arguments = Array(CommandLine.arguments.dropFirst())
-if ["get", "set", "info", "watch"].contains(arguments.first ?? "get") {
+let command = arguments.first ?? "status"
+if !["install", "uninstall", "help", "-h", "--help"].contains(command) {
     relaunchAsOwnResponsibleProcess()
 }
 do {
-    switch arguments.first ?? "get" {
-    case "get" where arguments.count <= 1:
-        let mice = try connectedMice()
-        for mouse in mice {
-            let dpi = try mouse.dpi().current
-            print(mice.count == 1 ? "\(dpi)" : "\(mouse.name): \(dpi)")
-        }
-    case "set" where arguments.count == 2:
+    switch command {
+    case "status" where arguments.count <= 1:
+        try showStatus()
+    case "dpi" where arguments.count == 1:
+        try printEachMouse { String(try $0.dpi().current) }
+    case "dpi" where arguments.count == 2:
         guard let dpi = Int(arguments[1]) else { usageError() }
         try setDPI(dpi)
-    case "info" where arguments.count == 1:
-        try showInfo()
     case "watch" where arguments.count == 1:
         Watcher().run()
     case "install" where arguments.count == 1:

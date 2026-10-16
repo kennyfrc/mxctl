@@ -68,7 +68,7 @@ final class Watcher {
 
     private func apply(_ mouse: Mouse, attempt: Int = 1) {
         guard let wanted = savedDPI() else {
-            logLine("\(mouse.name): no saved DPI yet; run `mxctl set <dpi>`")
+            logLine("\(mouse.name): no saved DPI yet; run `mxctl dpi <dpi>`")
             return
         }
         do {
@@ -94,14 +94,21 @@ func launchctl(_ arguments: String..., quiet: Bool = false) -> Int32 {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
     process.arguments = arguments
-    if quiet { process.standardError = FileHandle.nullDevice }
+    if quiet {
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+    }
     do { try process.run() } catch { return -1 }
     process.waitUntilExit()
     return process.terminationStatus
 }
 
+func agentIsLoaded() -> Bool {
+    launchctl("print", "gui/\(getuid())/\(agentLabel)", quiet: true) == 0
+}
+
 func installAgent() throws {
-    guard savedDPI() != nil else { throw MXError("run `mxctl set <dpi>` first; the agent re-applies the saved DPI") }
+    guard savedDPI() != nil else { throw MXError("run `mxctl dpi <dpi>` first; the agent re-applies the saved DPI") }
     guard let executable = Bundle.main.executableURL?.resolvingSymlinksInPath() else {
         throw MXError("cannot find the path of this program")
     }
