@@ -1,15 +1,15 @@
 // mxctl: read and set the DPI of a Logitech MX Master 3S (or another HID++ 2.0 mouse)
 // connected over Bluetooth LE on macOS, without Logi Options+.
 //
-// DPI lives in feature 0x2201 (Adjustable DPI). The mouse forgets it when it powers off and comes
-// back at its default (1000), so `watch` re-applies the saved value whenever the mouse reconnects.
+// The mouse forgets its settings when it powers off and comes back at its defaults (1000 DPI), so the
+// agent (`mxctl watch`, installed as a LaunchAgent) re-applies them whenever the mouse reconnects.
 
 import Foundation
 
 let usage = """
     usage: mxctl                          show the DPI and the agent
            mxctl dpi [<dpi>]              print or set the DPI
-           mxctl watch                    stay running: re-apply the saved DPI when the mouse
+           mxctl watch                    stay running: re-apply settings when the mouse
                                           reconnects
            mxctl install | uninstall      run `mxctl watch` at login (LaunchAgent \(agentLabel))
     """
@@ -49,7 +49,7 @@ func printEachMouse(_ value: (Mouse) throws -> String) throws {
 }
 
 func setDPI(_ wanted: Int) throws {
-    var applied: Int?
+    var settings = try Settings.load()
     for mouse in try connectedMice() {
         let range = try mouse.dpiRange()
         guard let lowest = range.values.first, let highest = range.values.last, lowest <= wanted, wanted <= highest,
@@ -59,9 +59,9 @@ func setDPI(_ wanted: Int) throws {
         let before = try mouse.dpi().current
         let after = try mouse.setDPI(target)
         print("\(mouse.name): \(before) -> \(after) DPI" + (target == wanted ? "" : " (nearest step to \(wanted))"))
-        applied = after
+        settings.dpi = after
     }
-    if let applied { try saveDPI(applied) }
+    try settings.save()
 }
 
 func showStatus() throws {
@@ -71,7 +71,7 @@ func showStatus() throws {
         print(mouse.name)
         print("  dpi       \(dpi.current) (default \(dpi.standard), supports \(range))")
     }
-    print("saved DPI   \(savedDPI().map(String.init) ?? "none") (\(savedDPIURL.path))")
+    print("settings    \(settingsURL.path)")
     print("agent       \(agentIsLoaded() ? "installed" : "not installed") (\(agentLabel))")
 }
 

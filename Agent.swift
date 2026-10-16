@@ -1,5 +1,6 @@
 import Foundation
 import IOKit.hid
+import notify
 
 let agentLabel = "local.mxctl"
 let agentURL = home.appendingPathComponent("Library/LaunchAgents/\(agentLabel).plist")
@@ -15,10 +16,12 @@ func logLine(_ message: String) {
     print("\(timestamp.string(from: Date())) \(message)")
 }
 
-/// Keeps the saved DPI applied: at start, whenever a mouse connects, and when it reports a reconnect.
+/// Keeps the saved settings applied: at start, whenever a mouse connects or reports a reconnect,
+/// and when the settings change.
 final class Watcher {
     private let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
     private var mice: [IOHIDDevice: Mouse] = [:]
+    private var notifyToken: Int32 = 0
 
     func run() -> Never {
         let context = Unmanaged.passUnretained(self).toOpaque()
@@ -30,7 +33,10 @@ final class Watcher {
             Unmanaged<Watcher>.fromOpaque(context!).takeUnretainedValue().disconnected(device)
         }, context)
         IOHIDManagerScheduleWithRunLoop(manager, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
-        logLine("watching; saved DPI: \(savedDPI().map(String.init) ?? "none")")
+        notify_register_dispatch(settingsChangedNotification, &notifyToken, .main) { [self] _ in
+            for mouse in Array(mice.values) { apply(mouse, reason: "settings changed") }
+        }
+        logLine("watching")
         withExtendedLifetime(self) { CFRunLoopRun() }
         exit(0)
     }
@@ -46,12 +52,11 @@ final class Watcher {
                     guard let mouse, featureIndex == wirelessStatus else { return }
                     logLine("\(mouse.name) sent a reconnect event (\(params.prefix(3).map(String.init).joined(separator: " ")))")
                     DispatchQueue.main.async { [weak mouse] in
-                        if let mouse { self.apply(mouse) }
+                        if let mouse { self.apply(mouse, reason: "reconnect event") }
                     }
                 }
                 mice[device] = mouse
-                logLine("\(mouse.name) connected")
-                apply(mouse)
+                apply(mouse, reason: "connected")
             } catch let error as PermissionError {
                 logLine("\(error)")
                 // A new grant may apply only to a new process; exit and let launchd start a fresh one.
@@ -66,24 +71,25 @@ final class Watcher {
         if let mouse = mice.removeValue(forKey: device) { logLine("\(mouse.name) disconnected") }
     }
 
-    private func apply(_ mouse: Mouse, attempt: Int = 1) {
-        guard let wanted = savedDPI() else {
-            logLine("\(mouse.name): no saved DPI yet; run `mxctl dpi <dpi>`")
-            return
-        }
+    private func apply(_ mouse: Mouse, reason: String, attempt: Int = 1) {
         do {
-            let found = try mouse.dpi().current
-            if found == wanted {
-                logLine("\(mouse.name) is at \(wanted) DPI")
-            } else {
-                let now = try mouse.setDPI(wanted)
-                logLine("\(mouse.name) was at \(found) DPI, set to \(now)")
+            let settings = try Settings.load()
+            var changes: [String] = []
+            if let wanted = settings.dpi {
+                let found = try mouse.dpi().current
+                if found != wanted {
+                    let now = try mouse.setDPI(wanted)
+                    changes.append("DPI \(found) -> \(now)")
+                }
             }
+            logLine("\(mouse.name) \(reason): " + (changes.isEmpty ? "settings already applied" : changes.joined(separator: ", ")))
         } catch {
-            logLine("\(mouse.name): \(error)")
+            logLine("\(mouse.name) \(reason): \(error)")
             guard attempt < 3 else { return }
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak mouse] in
-                if let mouse, self.mice.values.contains(where: { $0 === mouse }) { self.apply(mouse, attempt: attempt + 1) }
+                if let mouse, self.mice.values.contains(where: { $0 === mouse }) {
+                    self.apply(mouse, reason: reason, attempt: attempt + 1)
+                }
             }
         }
     }
@@ -108,7 +114,6 @@ func agentIsLoaded() -> Bool {
 }
 
 func installAgent() throws {
-    guard savedDPI() != nil else { throw MXError("run `mxctl dpi <dpi>` first; the agent re-applies the saved DPI") }
     guard let executable = Bundle.main.executableURL?.resolvingSymlinksInPath() else {
         throw MXError("cannot find the path of this program")
     }
