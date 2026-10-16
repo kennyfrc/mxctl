@@ -10,12 +10,23 @@ let hidppUsagePage = 0xFF43
 let reportID: UInt8 = 0x11
 let reportLength = 20
 let featureBattery: UInt16 = 0x1004         // Unified Battery
+let featureControls: UInt16 = 0x1B04        // Reprogrammable Controls v4: remap and divert buttons
 let featureWirelessStatus: UInt16 = 0x1D4B  // the mouse sends an event from this feature after it reconnects
 let featureDPI: UInt16 = 0x2201             // Adjustable DPI
 let matching = [kIOHIDVendorIDKey: logitechVendorID, kIOHIDDeviceUsagePageKey: hidppUsagePage] as CFDictionary
 
 let hidppErrors = ["no error", "unknown", "invalid argument", "out of range", "hardware error",
                    "internal error", "invalid feature index", "invalid function", "busy", "unsupported"]
+
+/// Names for the control IDs of the MX Master 3S buttons; other mice may use other IDs.
+let controlNames: [UInt16: String] = [
+    0x0050: "left", 0x0051: "right", 0x0052: "middle", 0x0053: "back", 0x0056: "forward",
+    0x00C3: "thumb", 0x00C4: "smartshift",
+]
+
+func controlName(_ cid: UInt16) -> String {
+    controlNames[cid] ?? String(format: "control-%04x", cid)
+}
 
 struct MXError: Error, CustomStringConvertible {
     let description: String
@@ -53,6 +64,21 @@ struct DPIRange: CustomStringConvertible {
     }
 }
 
+/// A button as the mouse describes it (0x1B04 getCidInfo).
+struct Control {
+    let cid: UInt16
+    let flags: UInt8
+    let group: UInt8
+    let groupMask: UInt8
+
+    var name: String { controlName(cid) }
+    var remappable: Bool { flags & 0x10 != 0 }
+    var divertable: Bool { flags & 0x20 != 0 }
+    var isVirtual: Bool { flags & 0x80 != 0 }
+    /// A physical button whose function or reporting can change.
+    var isConfigurable: Bool { (remappable || divertable) && !isVirtual }
+}
+
 /// A Logitech device that speaks HID++ 2.0 through its vendor HID collection.
 final class Mouse {
     let device: IOHIDDevice
@@ -62,8 +88,9 @@ final class Mouse {
     private var pending: (featureIndex: UInt8, function: UInt8)?
     private var reply: Result<[UInt8], MXError>?
     private var featureIndexes: [UInt16: UInt8] = [:]
-    /// Called for reports the mouse sends on its own (software id 0), such as the reconnect event.
-    var onEvent: ((_ featureIndex: UInt8, _ params: [UInt8]) -> Void)?
+    private var cachedControls: [Control]?
+    /// Called for reports the mouse sends on its own (software id 0): reconnects and diverted button presses.
+    var onEvent: ((_ featureIndex: UInt8, _ function: UInt8, _ params: [UInt8]) -> Void)?
 
     init(_ device: IOHIDDevice, softwareID: UInt8) throws {
         let name = IOHIDDeviceGetProperty(device, kIOHIDProductKey as CFString) as? String ?? "Logitech device"
@@ -123,7 +150,7 @@ final class Mouse {
             let code = Int(report[5])
             reply = .failure(MXError("\(name) rejected the request: \(code < hidppErrors.count ? hidppErrors[code] : "error \(code)")"))
         } else if report[3] & 0x0F == 0 {
-            onEvent?(report[2], Array(report[4...]))
+            onEvent?(report[2], report[3] >> 4, Array(report[4...]))
         }
     }
 
@@ -182,6 +209,50 @@ final class Mouse {
         let charge = capabilities[1] & 0x02 != 0 ? "\(status[0])%" : levels[status[1]] ?? "unknown level"
         let states = ["discharging", "charging", "charging slowly", "fully charged", "charging error"]
         return "\(charge), " + (Int(status[2]) < states.count ? states[Int(status[2])] : "charging state \(status[2])")
+    }
+
+    // MARK: Buttons (0x1B04)
+
+    /// The mouse's buttons, read once.
+    func controls() throws -> [Control] {
+        if let cachedControls { return cachedControls }
+        let index = try requireFeature(featureControls, "button remapping")
+        let count = Int(try request(index, 0x0)[0])
+        let controls = try (0..<count).map { position -> Control in
+            let info = try request(index, 0x1, [UInt8(position)])
+            return Control(cid: UInt16(info[0]) << 8 | UInt16(info[1]), flags: info[4], group: info[6], groupMask: info[7])
+        }
+        cachedControls = controls
+        return controls
+    }
+
+    /// The functions a button can take on by itself: its own, and those of the buttons in its groups.
+    func targets(for control: Control) throws -> [Control] {
+        try controls().filter { other in
+            other.cid == control.cid
+                || (!other.isVirtual && other.group > 0 && control.groupMask & (1 << (other.group - 1)) != 0)
+        }
+    }
+
+    /// Whether a button's presses go to software instead, and which button's function it performs.
+    func reporting(_ control: Control) throws -> (diverted: Bool, actingAs: UInt16) {
+        let index = try requireFeature(featureControls, "button remapping")
+        let params = try request(index, 0x2, [UInt8(control.cid >> 8), UInt8(control.cid & 0xFF)])
+        let remap = UInt16(params[3]) << 8 | UInt16(params[4])
+        return (params[2] & 0x01 != 0, remap == 0 ? control.cid : remap)
+    }
+
+    /// Diverts a button or not, and sets whose function it performs. Returns false if it already matched.
+    @discardableResult
+    func setReporting(_ control: Control, diverted: Bool, actingAs target: UInt16) throws -> Bool {
+        let now = try reporting(control)
+        guard now.diverted != diverted || now.actingAs != target else { return false }
+        let index = try requireFeature(featureControls, "button remapping")
+        // 0x02 tells the mouse to apply the divert bit (0x01); without it the divert state stays as is.
+        let flags: UInt8 = control.divertable ? (diverted ? 0x03 : 0x02) : 0x00
+        _ = try request(index, 0x3, [UInt8(control.cid >> 8), UInt8(control.cid & 0xFF), flags,
+                                     UInt8(target >> 8), UInt8(target & 0xFF)])
+        return true
     }
 }
 
